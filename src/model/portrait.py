@@ -9,8 +9,8 @@ from torch.utils.data import DataLoader
 
 import torch
 import torch.nn as nn
-
-
+from torchvision.models import resnet50
+from torch.utils.checkpoint import checkpoint
 
 import torchvision.models as models
 from src.model.generator import Generator, Discriminator
@@ -26,60 +26,74 @@ class Portrait(nn.Module):
 
         self.discriminator = Discriminator(512)
 
-        self.pose_encoder = models.resnet50()
-        self.pose_encoder.fc = nn.Sequential(
-            nn.Linear(2048, 512),
-            nn.Tanh()
-        )
+          # IRFD encoders
+        self.Ei = self._create_encoder()  # Identity encoder
+        self.Ee = self._create_encoder()  # Emotion encoder
+        self.Ep = self._create_encoder()  # Pose encoder
 
-        self.iden_encoder = models.resnet50()
-        self.iden_encoder.fc = nn.Sequential(
-            nn.Linear(2048, 512),
-            nn.Tanh()
-        )
+        self.irfd_generator = Generator(2048*3, 512)  # 1536 = 512*3 for identity, emotion, and pose
 
-        self.emot_encoder = models.resnet50()
-        self.emot_encoder.fc = nn.Sequential(
-            nn.Linear(2048, 512),
-            nn.Tanh()
-        )
-
-        self.generator = Generator(1536, 512)
+  
 
         self.to(self.device)
 
+    def _create_encoder(self):
+        encoder = resnet50(pretrained=True)
+        return nn.Sequential(*list(encoder.children())[:-1])
 
-    def encode(self, X):
-        Ei = self.iden_encoder(X)
-        Ep = self.pose_encoder(X)
-        Ee = self.emot_encoder(X)
-        return Ei, Ep, Ee
 
-    def encode_iden(self, X):
-        return self.iden_encoder(X)
 
-    def encode_pose(self, X):
-        return self.pose_encoder(X)
-
-    def encode_emot(self, X):     
-        return self.emot_encoder(X)
-
-    def decode(self, Ei, Ep, Ee, alpha, step, zero_noise=False):
-        Y = self.generator(torch.cat([Ei, Ep, Ee], dim=1), alpha, step, zero_noise)
+    def decode(self, fi_s, fe_s, fp_s, alpha, step, zero_noise=False):
+        Y = self.irfd_generator(torch.cat([fi_s, fe_s, fp_s], dim=1), alpha, step, zero_noise)
         return Y
 
+    def encode(self, X):
+        fi_s = self.Ei(X)
+        fe_s = self.Ep(X)
+        fp_s = self.Ee(X)
+        return fi_s, fe_s, fp_s
+    
     def discriminator_forward(self, X, alpha, step):
         return self.discriminator(X, alpha, step)
 
-    def forward(self, Xs, Xd, alpha, step, zero_noise=False):
-        Eis = self.iden_encoder(Xs)
-        Epd = self.pose_encoder(Xd)
-        Eed = self.emot_encoder(Xd)
+    def irfd_forward(self, x_s, x_t, alpha, step, zero_noise=False):
+        print(f"Input shapes: x_s: {x_s.shape}, x_t: {x_t.shape}")
 
-        Y = self.generator(torch.cat([Eis, Epd, Eed], dim=1), alpha, step, zero_noise)
+        # Encode source and target images
+        fi_s = checkpoint(self.Ei, x_s).squeeze()
+        fe_s = checkpoint(self.Ee, x_s).squeeze()
+        fp_s = checkpoint(self.Ep, x_s).squeeze()
+        
+        fi_t = checkpoint(self.Ei, x_t).squeeze()
+        fe_t = checkpoint(self.Ee, x_t).squeeze()
+        fp_t = checkpoint(self.Ep, x_t).squeeze()
 
-        return Y
-    
+        print(f"Encoded shapes: fi_s: {fi_s.shape}, fe_s: {fe_s.shape}, fp_s: {fp_s.shape}")
+        print(f"Encoded shapes: fi_t: {fi_t.shape}, fe_t: {fe_t.shape}, fp_t: {fp_t.shape}")
+
+        # Randomly swap one type of feature
+        swap_type = torch.randint(0, 3, (1,)).item()
+        if swap_type == 0:
+            fi_s, fi_t = fi_t, fi_s
+        elif swap_type == 1:
+            fe_s, fe_t = fe_t, fe_s
+        else:
+            fp_s, fp_t = fp_t, fp_s
+
+        # Concatenate features and generate reconstructed images
+        features_s = torch.cat([fi_s, fe_s, fp_s], dim=1)
+        features_t = torch.cat([fi_t, fe_t, fp_t], dim=1)
+
+        print(f"Concatenated feature shapes: features_s: {features_s.shape}, features_t: {features_t.shape}")
+
+        reconstructed_s = self.irfd_generator(features_s, alpha, step, zero_noise)
+        reconstructed_t = self.irfd_generator(features_t, alpha, step, zero_noise)
+
+        print(f"Reconstructed shapes: reconstructed_s: {reconstructed_s.shape}, reconstructed_t: {reconstructed_t.shape}")
+
+        return reconstructed_s, reconstructed_t, fi_s, fe_s, fp_s, fi_t, fe_t, fp_t
+
+
     def save_model(self, path, epoch, optimizer, current_resolution):
         if not os.path.exists(path):
             os.makedirs(path)

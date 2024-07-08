@@ -1,7 +1,7 @@
 training:
   name: 'local_train'
-  use_wandb: False
-  data_path: 'dataset/mp4'
+  use_wandb: True
+  data_path: '/media/oem/12TB/Downloads/CelebV-HQ/celebvhq'
   learning_rate: 0.0001
   num_epochs: 5
   batch_size: 2
@@ -11,17 +11,12 @@ training:
   final_resolution: 256
 
 weights:
-  irfd:
-    i: 0.5
-    e: 0.5
-    p: 0.5
   gan:
     real: 0.2
     fake: 0.6
     feature_matching: 0.2
     adversarial: 0.4
   perceptual:
-    lpips: 0.5
-    vgg: 0.5
+    lpips: 1.0
 
 # equation for num_epochs is (log2final_resolution - log2initial_resolution + 1) * epochs_per_stage + (log2final_resolution - log2initial_resolution) * transition_epochs

@@ -3,7 +3,7 @@ import yaml
 
 from torch.utils.data import DataLoader
 from src.dataloader import VideoDataset, transform  # Import the dataset class and transformation
-from src.model.loss import PerceptualLoss, GANLoss, CycleConsistencyLoss, IEPLoss
+from src.model.loss import PerceptualLoss, GANLoss, CycleConsistencyLoss
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -14,9 +14,9 @@ import tqdm
 import math
 import os
 from PIL import Image
-
+from torchvision import transforms
 from src.model.portrait import Portrait
-
+import torch.nn.functional as F
 
 def collate_frames(batch):
     """
@@ -88,8 +88,8 @@ def train_model(config, p, train_loader):
     optimizer = torch.optim.Adam(p.parameters(), lr=p.config["training"]["learning_rate"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     p.to(device)
-    if config["training"]["use_wandb"]:
-        wandb.init(project='portrait_project', resume="allow", config=config)
+    # if config["training"]["use_wandb"]:
+        # wandb.init(project='portrait_project', resume="allow", config=config)
 
     checkpoint_path = f"./models/portrait/{p.config['training']['name']}/"
     num_epochs = config["training"]["num_epochs"]
@@ -103,27 +103,27 @@ def train_model(config, p, train_loader):
     epochs_per_full_stage = epochs_per_stage + transition_epochs
     current_resolution = initial_resolution
 
-    if os.path.exists(checkpoint_path) and len(os.listdir(checkpoint_path)) != 0:
-        latest_epoch = max([int(epoch_dir.split("epoch")[1]) for epoch_dir in os.listdir(checkpoint_path)])
-        checkpoint_path = os.path.join(checkpoint_path, f"epoch{latest_epoch}/checkpoint.pth")
+    if checkpoint_path is not None:
+        if os.path.exists(checkpoint_path) and len(os.listdir(checkpoint_path)) == 0:
+            latest_epoch = max([int(epoch_dir.split("epoch")[1]) for epoch_dir in os.listdir(checkpoint_path)])
+            checkpoint_path = os.path.join(checkpoint_path, f"epoch{latest_epoch}/checkpoint.pth")
 
-        checkpoint = torch.load(checkpoint_path)
-        p.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1  # Start from next epoch
-        current_resolution = checkpoint['current_resolution']
+            checkpoint = torch.load(checkpoint_path)
+            p.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1  # Start from next epoch
+            current_resolution = checkpoint['current_resolution']
 
     p.train()
     perceptual_loss = PerceptualLoss(config)
     gan_loss = GANLoss(config, model=p)
-    iep_loss = IEPLoss(config, model=p)
 
     for epoch in range(start_epoch, num_epochs):
         running_loss = 0
 
         # Wrap the training loader with tqdm for a progress bar
         train_iterator = tqdm.tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", total=len(train_loader))
-        log_interval = len(train_loader) // 3
+        log_interval = 1000# len(train_loader) // 3
 
         current_resolution = min(initial_resolution*2**(epoch//epochs_per_full_stage), final_resolution)
         step = int(math.log2(current_resolution))-2
@@ -153,36 +153,39 @@ def train_model(config, p, train_loader):
             else:
                 alpha = 0
 
+            
             optimizer.zero_grad()
 
-            Eid, Eed, Epd = p.encode(Xd)
-            Eis, Ees, Eps = p.encode(Xs)
+            # IRFD forward pass
+            reconstructed_s, reconstructed_t, fi_s, fe_s, fp_s, fi_t, fe_t, fp_t = p.irfd_forward(Xs, Xd,alpha,step)
 
-            gd = p.decode(Eid, Eed, Epd, alpha, step)
-            gs = p.decode(Eis, Ees, Eps, alpha, step)
+            # Calculate IRFD losses
+            L_identity = F.mse_loss(fi_s, p.Ei(reconstructed_s)) + F.mse_loss(fi_t, p.Ei(reconstructed_t))
+            L_emotion = F.mse_loss(fe_s, p.Ee(reconstructed_s)) + F.mse_loss(fe_t, p.Ee(reconstructed_t))
+            L_pose = F.mse_loss(fp_s, p.Ep(reconstructed_s)) + F.mse_loss(fp_t, p.Ep(reconstructed_t))
+            # L_self = F.mse_loss(reconstructed_s, Xs) + F.mse_loss(reconstructed_t, Xd)
 
-            gid = p.decode(Eis, Eed, Epd, alpha, step) # g = image, i = identity swap, d = driver, s = source
-            gis = p.decode(Eid, Ees, Eps, alpha, step)
+            # Calculate classification loss if needed (you'll need to implement or use a pre-trained classifier)
+            # L_cls = classification_loss(fe_s, emotion_labels_s) + classification_loss(fe_t, emotion_labels_t)
 
-            ged = p.decode(Eid, Ees, Epd, alpha, step)
-            ges = p.decode(Eis, Eed, Eps, alpha, step)
+            # Combine IRFD losses
+            L_disentanglement = L_identity + L_emotion + L_pose # + L_self  # + L_cls if using classification loss
 
-            gpd = p.decode(Eid, Eed, Eps, alpha, step)
-            gps = p.decode(Eis, Ees, Epd, alpha, step)
+            # # Original talking head generation forward pass
+            fi_d, fe_d, fp_d = p.encode(Xd)
+            print(f"fi_d:{fi_d.shape} fe_d:{fe_d.shape} fp_d:{fp_d.shape}")
+            gd = p.decode(fi_d, fe_d, fp_d, alpha, step)
 
-            # missing Lcls
-            Liep = iep_loss(gs, gd, gis, gid, ges, ged, gps, gpd)
-
-            # Convert the numpy array to an image
+            # Calculate original losses
             Lper = perceptual_loss(Xd, gd)
             Lgan = gan_loss(Xd, gd, alpha, step)
 
-            total_loss = Lper[0] + Lgan[0] + Liep[0]
-
-            running_loss += total_loss.item()
+            # Combine all losses
+            total_loss = L_disentanglement + Lper[0] + Lgan[0]
 
             total_loss.backward()
             optimizer.step()
+
 
             if idx % log_interval == 0 and config["training"]["use_wandb"]:
                 wandb.log({
@@ -196,16 +199,10 @@ def train_model(config, p, train_loader):
                 'Total Loss': total_loss.item()
             }
 
-            if p.config['weights']['perceptual']['vgg'] != 0:
-                wandb_log['vgg loss'] = Lper[1]['vgg'].item()
+            # if self.config['weights']['perceptual']['gaze'] != 0:
+            #     wandb_log['Gaze Loss'] = Lper[1]['Lgaze'].item()
             if p.config['weights']['perceptual']['lpips'] != 0:
                 wandb_log['lpips Loss'] = Lper[1]['lpips'].item()
-            if p.config['weights']['irfd']['i'] != 0:
-                wandb_log['Identity IRFD Loss'] = Liep[1]['iden_loss'].item()
-            if p.config['weights']['irfd']['e'] != 0:
-                wandb_log['Emotion IRFD Loss'] = Liep[1]['emot_loss'].item()
-            if p.config['weights']['irfd']['p'] != 0:
-                wandb_log['Pose IRFD Loss'] = Liep[1]['pose_loss'].item()
             if p.config['weights']['gan']['real'] + p.config['weights']['gan']['fake'] + p.config['weights']['gan'][
                 'feature_matching'] != 0:
                 wandb_log['GAN Loss'] = Lgan[0].item()
@@ -215,8 +212,6 @@ def train_model(config, p, train_loader):
                 wandb_log['GAN fake Loss'] = Lgan[1]['fake_loss'].item()
             if p.config['weights']['gan']['adversarial'] != 0:
                 wandb_log['GAN adversarial Loss'] = Lgan[1]['adversarial_loss'].item()
-
-            
             # if p.config['weights']['gan']['feature_matching'] != 0:
             #     wandb_log['Gan feature Loss'] = Lgan[1]['feature_matching_loss'].item()
 
@@ -237,7 +232,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Script for handling emopath and eapp_path arguments.")
     
-    parser.add_argument('--config_path', type=str, default=None, help='Path to the config')
+    parser.add_argument('--config_path', type=str, default='./config/local_train.yaml', help='Path to the config')
     args = parser.parse_args()
 
     if args.config_path is not None:
@@ -246,8 +241,12 @@ def main():
     else:
         print("Config path is None")
         assert False
-        
-    video_dataset = load_data(root_dir='./dataset/mp4', transform=transform, batch_size=config["training"]["batch_size"])
+    # preprocess = transforms.Compose([
+    #     transforms.Resize((256, 256)),
+    #     transforms.RandomHorizontalFlip(),
+    #     transforms.Normalize([0.5], [0.5]),
+    # ])
+    video_dataset = load_data(root_dir='/media/oem/12TB/Downloads/CelebV-HQ/celebvhq', transform=transform, batch_size=config["training"]["batch_size"])
     p = Portrait(config)
 
     train_model(config, p, video_dataset)
