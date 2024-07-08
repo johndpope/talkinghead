@@ -92,6 +92,11 @@ def save_debug_images(x_s, x_t, x_s_recon, x_t_recon, step, resolution, output_d
     x_s, x_t = denorm(x_s), denorm(x_t)
     x_s_recon, x_t_recon = denorm(x_s_recon), denorm(x_t_recon)
     
+    print('x_s:',x_s.shape)
+    print('x_t:',x_t.shape)
+    print('x_s_recon:',x_s_recon.shape)
+    print('x_t_recon:',x_t_recon.shape)
+    
     combined = torch.cat([x_s, x_s_recon, x_t, x_t_recon], dim=0)
     
     num_sets = min(16, x_s.size(0))
@@ -310,7 +315,7 @@ def main():
       # Load the dataset
     base_dataset = get_base_dataset(preprocess)
 
-    train_dataloader = create_progressive_dataloader(config, base_dataset, 64, is_validation=False)
+    train_dataloader = create_progressive_dataloader(config, base_dataset, 256, is_validation=False)
     # val_dataloader = create_progressive_dataloader(config, base_dataset, 64, is_validation=True)
 
 
