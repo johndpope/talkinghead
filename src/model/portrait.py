@@ -31,7 +31,7 @@ class Portrait(nn.Module):
         self.Ee = self._create_encoder()  # Emotion encoder
         self.Ep = self._create_encoder()  # Pose encoder
 
-        self.irfd_generator = Generator(2048*3, 512)  # 1536 = 512*3 for identity, emotion, and pose
+        self.irfd_generator = Generator(512*3, 512)  # 1536 = 512*3 for identity, emotion, and pose
 
   
 
@@ -39,7 +39,12 @@ class Portrait(nn.Module):
 
     def _create_encoder(self):
         encoder = resnet50(pretrained=True)
-        return nn.Sequential(*list(encoder.children())[:-1])
+        # return nn.Sequential(*list(encoder.children())[:-1])
+        encoder.fc = nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.Tanh()
+        )
+        return encoder
 
 
 

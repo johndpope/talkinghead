@@ -88,8 +88,8 @@ def train_model(config, p, train_loader):
     optimizer = torch.optim.Adam(p.parameters(), lr=p.config["training"]["learning_rate"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     p.to(device)
-    # if config["training"]["use_wandb"]:
-        # wandb.init(project='portrait_project', resume="allow", config=config)
+    if config["training"]["use_wandb"]:
+        wandb.init(project='portrait_project', resume="allow", config=config)
 
     checkpoint_path = f"./models/portrait/{p.config['training']['name']}/"
     num_epochs = config["training"]["num_epochs"]
