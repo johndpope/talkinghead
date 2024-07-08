@@ -31,7 +31,7 @@ class Portrait(nn.Module):
         self.Ee = self._create_encoder()  # Emotion encoder
         self.Ep = self._create_encoder()  # Pose encoder
 
-        self.irfd_generator = Generator(512*3, 512)  # 1536 = 512*3 for identity, emotion, and pose
+        self.irfd_generator = Generator(128*3, 512)  # 1536 = 512*3 for identity, emotion, and pose
 
   
 
@@ -41,7 +41,7 @@ class Portrait(nn.Module):
         encoder = resnet50(pretrained=True)
         # return nn.Sequential(*list(encoder.children())[:-1])
         encoder.fc = nn.Sequential(
-            nn.Linear(2048, 512),
+            nn.Linear(2048, 128),
             nn.Tanh()
         )
         return encoder
@@ -62,7 +62,7 @@ class Portrait(nn.Module):
         return self.discriminator(X, alpha, step)
 
     def irfd_forward(self, x_s, x_t, alpha, step, zero_noise=False):
-        print(f"Input shapes: x_s: {x_s.shape}, x_t: {x_t.shape}")
+        # print(f"Input shapes: x_s: {x_s.shape}, x_t: {x_t.shape}")
 
         # Encode source and target images
         fi_s = checkpoint(self.Ei, x_s).squeeze()
@@ -73,8 +73,8 @@ class Portrait(nn.Module):
         fe_t = checkpoint(self.Ee, x_t).squeeze()
         fp_t = checkpoint(self.Ep, x_t).squeeze()
 
-        print(f"Encoded shapes: fi_s: {fi_s.shape}, fe_s: {fe_s.shape}, fp_s: {fp_s.shape}")
-        print(f"Encoded shapes: fi_t: {fi_t.shape}, fe_t: {fe_t.shape}, fp_t: {fp_t.shape}")
+        # print(f"Encoded shapes: fi_s: {fi_s.shape}, fe_s: {fe_s.shape}, fp_s: {fp_s.shape}")
+        # print(f"Encoded shapes: fi_t: {fi_t.shape}, fe_t: {fe_t.shape}, fp_t: {fp_t.shape}")
 
         # Randomly swap one type of feature
         swap_type = torch.randint(0, 3, (1,)).item()
@@ -89,12 +89,12 @@ class Portrait(nn.Module):
         features_s = torch.cat([fi_s, fe_s, fp_s], dim=1)
         features_t = torch.cat([fi_t, fe_t, fp_t], dim=1)
 
-        print(f"Concatenated feature shapes: features_s: {features_s.shape}, features_t: {features_t.shape}")
+        # print(f"Concatenated feature shapes: features_s: {features_s.shape}, features_t: {features_t.shape}")
 
         reconstructed_s = self.irfd_generator(features_s, alpha, step, zero_noise)
         reconstructed_t = self.irfd_generator(features_t, alpha, step, zero_noise)
 
-        print(f"Reconstructed shapes: reconstructed_s: {reconstructed_s.shape}, reconstructed_t: {reconstructed_t.shape}")
+        # print(f"Reconstructed shapes: reconstructed_s: {reconstructed_s.shape}, reconstructed_t: {reconstructed_t.shape}")
 
         return reconstructed_s, reconstructed_t, fi_s, fe_s, fp_s, fi_t, fe_t, fp_t
 

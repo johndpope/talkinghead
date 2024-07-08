@@ -157,32 +157,32 @@ class Generator(nn.Module):
         return torch.tanh(alpha * generated + (1 - alpha) * upscaled)
 
     def forward(self, w, alpha, steps, zero_noise=False):
-        print(f"Generator input shape: w: {w.shape}")
+        # print(f"Generator input shape: w: {w.shape}")
         
         x = self.initial_adain1(self.initial_noise1(self.starting_constant, zero_noise), w)
-        print(f"After initial AdaIN: {x.shape}")
+        # print(f"After initial AdaIN: {x.shape}")
         
         x = self.initial_conv(x)
-        print(f"After initial conv: {x.shape}")
+        # print(f"After initial conv: {x.shape}")
         
         out = self.initial_adain2(self.leaky(self.initial_noise2(x, zero_noise)), w)
-        print(f"After second AdaIN: {out.shape}")
+        # print(f"After second AdaIN: {out.shape}")
 
         if steps == 0:
             return self.initial_rgb(x)
 
         for step in range(steps):
             upscaled = F.interpolate(out, scale_factor=2, mode="bilinear")
-            print(f"After upscale (step {step}): {upscaled.shape}")
+            # print(f"After upscale (step {step}): {upscaled.shape}")
             out = self.prog_blocks[step](upscaled, w, zero_noise)
-            print(f"After prog_block (step {step}): {out.shape}")
+            # print(f"After prog_block (step {step}): {out.shape}")
 
         final_upscaled = self.rgb_layers[steps - 1](upscaled)
         final_out = self.rgb_layers[steps](out)
-        print(f"Final shapes: upscaled: {final_upscaled.shape}, out: {final_out.shape}")
+        # print(f"Final shapes: upscaled: {final_upscaled.shape}, out: {final_out.shape}")
         
         ret = self.fade_in(alpha, final_upscaled, final_out)
-        print(f"Return shape: {ret.shape}")
+        # print(f"Return shape: {ret.shape}")
         
         return ret
 

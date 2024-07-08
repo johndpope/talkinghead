@@ -17,6 +17,9 @@ from PIL import Image
 from torchvision import transforms
 from src.model.portrait import Portrait
 import torch.nn.functional as F
+from CelebADataset import CelebADataset,ProgressiveDataset,AffectNetDataset
+from torchvision.utils import save_image
+
 
 def collate_frames(batch):
     """
@@ -82,6 +85,18 @@ def load_data(root_dir, batch_size=8, transform=None):
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_frames)
     return dataloader
 
+def save_debug_images(x_s, x_t, x_s_recon, x_t_recon, step, resolution, output_dir):
+    def denorm(x):
+        return (x * 0.5 + 0.5).clamp(0, 1)
+    
+    x_s, x_t = denorm(x_s), denorm(x_t)
+    x_s_recon, x_t_recon = denorm(x_s_recon), denorm(x_t_recon)
+    
+    combined = torch.cat([x_s, x_s_recon, x_t, x_t_recon], dim=0)
+    
+    num_sets = min(16, x_s.size(0))
+    save_image(combined[:num_sets*4], os.path.join(output_dir, f"debug_step_{step}_resolution_{resolution}.png"), nrow=4)
+
 
 def train_model(config, p, train_loader):
     initial_resolution = config["training"]["initial_resolution"]
@@ -134,36 +149,28 @@ def train_model(config, p, train_loader):
         else:
             passed_transitions = epoch % epochs_per_full_stage - epochs_per_stage
 
-        for idx, (Xs, Xd, Xsp, Xdp) in enumerate(train_iterator):
-            min_batch_size = min(Xs.size(0), Xd.size(0), Xsp.size(0), Xdp.size(0))
-
-            # Check if the minimum batch size is zero
-            if min_batch_size == 0:
-                continue  # Skip this iteration
-
-            # Crop batches to the minimum batch size
-            Xs = Xs[:min_batch_size].to(device)
-            Xd = Xd[:min_batch_size].to(device)
-            Xsp = Xsp[:min_batch_size].to(device)
-            Xdp = Xdp[:min_batch_size].to(device)
+        for step, batch in enumerate(train_loader):
+            x_s, x_t = batch["source_image"], batch["target_image"]
+            x_s = x_s.to(device)
+            x_t = x_t.to(device)
+            emotion_labels_s, emotion_labels_t = batch["emotion_labels_s"], batch["emotion_labels_t"]
+            
+            optimizer.zero_grad()
 
             if in_transition:
-                alpha = (passed_transitions * len(train_loader) + idx) / (transition_epochs * len(train_loader))
+                alpha = (passed_transitions * len(train_loader) + step) / (transition_epochs * len(train_loader))
                 alpha = max(0, min(alpha, 1))
             else:
                 alpha = 0
 
-            
-            optimizer.zero_grad()
-
             # IRFD forward pass
-            reconstructed_s, reconstructed_t, fi_s, fe_s, fp_s, fi_t, fe_t, fp_t = p.irfd_forward(Xs, Xd,alpha,step)
+            x_s_recon, x_t_recon, fi_s, fe_s, fp_s, fi_t, fe_t, fp_t = p.irfd_forward(x_s, x_t,alpha,step)
 
             # Calculate IRFD losses
-            L_identity = F.mse_loss(fi_s, p.Ei(reconstructed_s)) + F.mse_loss(fi_t, p.Ei(reconstructed_t))
-            L_emotion = F.mse_loss(fe_s, p.Ee(reconstructed_s)) + F.mse_loss(fe_t, p.Ee(reconstructed_t))
-            L_pose = F.mse_loss(fp_s, p.Ep(reconstructed_s)) + F.mse_loss(fp_t, p.Ep(reconstructed_t))
-            # L_self = F.mse_loss(reconstructed_s, Xs) + F.mse_loss(reconstructed_t, Xd)
+            L_identity = F.mse_loss(fi_s, p.Ei(x_s_recon)) + F.mse_loss(fi_t, p.Ei(x_t_recon))
+            L_emotion = F.mse_loss(fe_s, p.Ee(x_s_recon)) + F.mse_loss(fe_t, p.Ee(x_t_recon))
+            L_pose = F.mse_loss(fp_s, p.Ep(x_s_recon)) + F.mse_loss(fp_t, p.Ep(x_t_recon))
+            # L_self = F.mse_loss(x_s_recon, Xs) + F.mse_loss(x_t_recon, Xd)
 
             # Calculate classification loss if needed (you'll need to implement or use a pre-trained classifier)
             # L_cls = classification_loss(fe_s, emotion_labels_s) + classification_loss(fe_t, emotion_labels_t)
@@ -172,13 +179,13 @@ def train_model(config, p, train_loader):
             L_disentanglement = L_identity + L_emotion + L_pose # + L_self  # + L_cls if using classification loss
 
             # # Original talking head generation forward pass
-            fi_d, fe_d, fp_d = p.encode(Xd)
+            fi_d, fe_d, fp_d = p.encode(x_t)
             print(f"fi_d:{fi_d.shape} fe_d:{fe_d.shape} fp_d:{fp_d.shape}")
             gd = p.decode(fi_d, fe_d, fp_d, alpha, step)
 
             # Calculate original losses
-            Lper = perceptual_loss(Xd, gd)
-            Lgan = gan_loss(Xd, gd, alpha, step)
+            Lper = perceptual_loss(x_t, gd)
+            Lgan = gan_loss(x_t, gd, alpha, step)
 
             # Combine all losses
             total_loss = L_disentanglement + Lper[0] + Lgan[0]
@@ -186,11 +193,12 @@ def train_model(config, p, train_loader):
             total_loss.backward()
             optimizer.step()
 
-
-            if idx % log_interval == 0 and config["training"]["use_wandb"]:
+            if step % config['training']['save_image_steps'] == 0:
+                save_debug_images(x_s, x_t, x_s_recon, x_t_recon, epoch, step, config['training']['output_dir'])
+            if step % log_interval == 0 and config["training"]["use_wandb"]:
                 wandb.log({
-                    'Example Source': wandb.Image(Xs[0].cpu().detach().numpy().transpose(1, 2, 0)),
-                    'Example Driver': wandb.Image(Xd[0].cpu().detach().numpy().transpose(1, 2, 0)),
+                    'Example Source': wandb.Image(x_s[0].cpu().detach().numpy().transpose(1, 2, 0)),
+                    'Example Driver': wandb.Image(x_t[0].cpu().detach().numpy().transpose(1, 2, 0)),
                     'Example Output': wandb.Image(gd[0].cpu().detach().numpy().transpose(1, 2, 0)),
                 })
 
@@ -228,6 +236,42 @@ def train_model(config, p, train_loader):
                      optimizer=optimizer, current_resolution=current_resolution)
         print(f'Epoch {epoch + 1}, Average Loss {running_loss / len(train_loader):.4f}')
 
+def create_progressive_dataloader(config, base_dataset, resolution, is_validation=False):
+    print("config:")
+    progressive_dataset = ProgressiveDataset(base_dataset, resolution)
+
+    # return torch.utils.data.DataLoader(
+    #     OverfitDataset('S.png', 'T.png'),
+    #     batch_size=1,
+    #     num_workers=config.training.num_workers,
+    #     pin_memory=True
+    # )
+    
+    # Split the dataset into training and validation
+    train_size = int(0.8 * len(progressive_dataset))  # 80% for training
+    val_size = len(progressive_dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(progressive_dataset, [train_size, val_size])
+    
+    if is_validation:
+        dataset = val_dataset
+        batch_size = config.training.eval_batch_size
+        shuffle = False
+    else:
+        dataset = train_dataset
+        batch_size = config['training']['batch_size']
+        shuffle = True
+
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers= config['training']['num_workers'],
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2
+    )
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Script for handling emopath and eapp_path arguments.")
@@ -241,15 +285,39 @@ def main():
     else:
         print("Config path is None")
         assert False
-    # preprocess = transforms.Compose([
-    #     transforms.Resize((256, 256)),
-    #     transforms.RandomHorizontalFlip(),
-    #     transforms.Normalize([0.5], [0.5]),
-    # ])
-    video_dataset = load_data(root_dir='/media/oem/12TB/Downloads/CelebV-HQ/celebvhq', transform=transform, batch_size=config["training"]["batch_size"])
+
+
+    # Set up preprocessing
+    preprocess = transforms.Compose([
+        transforms.Resize((256, 256)),  # Start with the highest resolution
+        # transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5]),
+    ])
+
+
+    def get_base_dataset(preprocess):
+        test =  AffectNetDataset(
+            root_dir="/media/oem/12TB/AffectNet/train",
+            preprocess=preprocess,
+            remove_background=False,
+            use_greenscreen=False,
+            cache_dir='/media/oem/12TB/AffectNet/train/cache'
+        )
+        return test
+        # return CelebADataset(config.dataset.name, config.dataset.split, preprocess)
+
+      # Load the dataset
+    base_dataset = get_base_dataset(preprocess)
+
+    train_dataloader = create_progressive_dataloader(config, base_dataset, 64, is_validation=False)
+    # val_dataloader = create_progressive_dataloader(config, base_dataset, 64, is_validation=True)
+
+
+
     p = Portrait(config)
 
-    train_model(config, p, video_dataset)
+    train_model(config, p, train_dataloader)
 
 
 if __name__ == '__main__':

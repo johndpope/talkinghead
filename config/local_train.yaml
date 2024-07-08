@@ -7,8 +7,11 @@ training:
   batch_size: 2
   epochs_per_stage: 2
   transition_epochs: 2
-  initial_resolution: 4
+  initial_resolution: 64
   final_resolution: 256
+  num_workers: 4
+  save_image_steps: 1000
+  output_dir: 'images'
 
 weights:
   gan:
